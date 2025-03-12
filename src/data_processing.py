@@ -1,3 +1,4 @@
+import math
 import typing
 from pathlib import Path
 
@@ -101,6 +102,40 @@ def calculate_similarity_to_start_frames(frame_encoding: torch.Tensor, start_fra
     return similarity.mean().item()
 
 
+def display_most_similar_frames(
+    frames: torch.Tensor,
+    similarity_to_start_frames: typing.List[float],
+    top_k: int
+):
+    column_count = 4
+    _, sorted_frame_indices = torch.Tensor(similarity_to_start_frames).sort(descending=True)
+    most_similar_frames = frames[sorted_frame_indices[:top_k]]
+
+    # format each image into a grid of subplots
+    cols, rows = column_count, max(1, math.ceil(top_k / column_count))
+    fig, axes = plt.subplots(
+        ncols=cols,
+        nrows=rows,
+        # sharex='col',
+        # sharey='row',
+        figsize=(cols, rows),
+        gridspec_kw={'hspace': 0, 'wspace': 0}
+    )
+    for i, frame in enumerate(most_similar_frames):
+        x, y = i % column_count, i // column_count
+        axes[y, x].imshow(tensor_to_image(frame))
+        axes[y, x].set_aspect('equal')
+        axes[y, x].set_xticklabels([])
+        axes[y, x].set_yticklabels([])
+        # axes[y, x].set_title(f'Match #{i + 1}')
+
+    fig.suptitle(f'Top {top_k} Matches from Scan')
+    subtitle = ', '.join([str(t.item()) for t in sorted_frame_indices[:top_k]])
+    fig.text(0.5, 0.93, subtitle, ha='center', fontsize=6, color='gray')
+    plt.tight_layout()
+    plt.show()
+
+
 def run_experiment():
     device = 'cpu'
     encoder = load_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
@@ -123,10 +158,7 @@ def run_experiment():
     plt.scatter(range(len(similarity_to_start_frames)), similarity_to_start_frames)
     plt.show()
 
-    _, best_matches = torch.Tensor(similarity_to_start_frames).sort(descending=True)
-    # best_match = best_matches[0]
-    for match in best_matches[:10]:
-        display_frame(scan_frames[match, :, :, :], f'Scan View Frame #{match}')
+    display_most_similar_frames(scan_frames, similarity_to_start_frames, top_k=20)
 
 
 def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: str = None):
