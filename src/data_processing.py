@@ -84,53 +84,49 @@ def encode_frames(encoder: nn.Module, frames: torch.Tensor, cache_path: str = No
     return cache_operation(encode, cache_path=cache_path)
 
 
+def display_frame(frame: torch.Tensor, title: str = None):
+    if title is not None:
+        plt.title(title)
+    plt.imshow(tensor_to_image(frame))
+    plt.show()
+    plt.figure()
+
+
+def calculate_similarity_to_start_frames(frame_encoding: torch.Tensor, start_frame_encodings: torch.Tensor) -> float:
+    x, y = start_frame_encodings, frame_encoding.repeat(start_frame_encodings.size(0), 1, 1)
+    similarity = F.cosine_similarity(x, y, dim=-1)
+    # similarity = -torch.norm(x - y, dim=-1)
+    # ten_percent = max(int(0.1 * similarity.size(0)), 1)
+    # similarity.sort(descending=True)[0][:ten_percent].mean().item()
+    return similarity.mean().item()
+
+
 def run_experiment():
     device = 'cpu'
     encoder = load_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
 
     scan_frames = load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
-    def show_scan_frame(index: int):
-        plt.title(f'Scan View Frame #{index}')
-        plt.imshow(tensor_to_image(scan_frames[index, :, :, :]))
-        plt.show()
-        plt.figure()
 
     start_frames = get_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
-    plt.title('Sample Start Frame')
-    plt.imshow(tensor_to_image(start_frames[50, :, :, :]))
-    plt.show()
-    plt.figure()
+    display_frame(start_frames[50, :, :, :], title='Sample Start Frame')
+
     scan_frame_encodings = encode_frames(encoder, scan_frames, cache_path='../cache/scan_frame_encodings.pt')
     start_frame_encodings = encode_frames(encoder, start_frames, cache_path='../cache/start_frame_encodings.pt')
 
-    start_frame_similarity = []
+    similarity_to_start_frames = []
     for scan_frame in tqdm(scan_frame_encodings, desc='Comparing each scan frame to start frames'):
-        x, y = start_frame_encodings, scan_frame.repeat(start_frame_encodings.size(0), 1, 1)
-        similarity = F.cosine_similarity(x, y, dim=-1)
-        # similarity = -torch.norm(x - y, dim=-1)
-        # similarity = torch.zeros(ref_frames.size)
-        # query = extract_orb_features(scan_frame)[1]
-        # best_matches = 0
-        # for i, ref in enumerate(reference_descriptors):
-        #     matches = match_features(query, ref)
-        #     similarity[i] = len(matches)
-        #     # best_matches = max(matches, best_matches)
-
-        # print(similarity.shape, similarity.__class__)
-        ten_percent = max(int(0.1 * similarity.size(0)), 1)
-        # start_frame_similarity.append(similarity.sort(descending=True)[0][:ten_percent].mean().item())
-        start_frame_similarity.append(similarity.mean().item())
+        similarity_to_start_frames.append(calculate_similarity_to_start_frames(scan_frame, start_frame_encodings))
 
     plt.title(f'Similarity to Start Frames')
     plt.xlabel('Frame')
     plt.ylabel('Similarity')
-    plt.scatter(range(len(start_frame_similarity)), start_frame_similarity)
+    plt.scatter(range(len(similarity_to_start_frames)), similarity_to_start_frames)
     plt.show()
 
-    _, best_matches = torch.Tensor(start_frame_similarity).sort(descending=True)
+    _, best_matches = torch.Tensor(similarity_to_start_frames).sort(descending=True)
     # best_match = best_matches[0]
     for match in best_matches[:10]:
-        show_scan_frame(match)
+        display_frame(scan_frames[match, :, :, :], f'Scan View Frame #{match}')
 
 
 def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: str = None):
