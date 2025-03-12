@@ -1,3 +1,4 @@
+import typing
 from pathlib import Path
 
 import cv2
@@ -40,35 +41,31 @@ def load_encoder(weight_path: str, device) -> nn.Module:
     # return model
 
 
-def load_video_frames(mp4_path: str, refresh: bool = True) -> torch.Tensor:
-    # Taken from data-collection/utils/new_gripper_model.py line 54
-    # print(f'Loading frames from {mp4_path}.')
-    cache_file = Path(os.path.dirname(mp4_path)) / 'mp4_cache.pt'
-    if not refresh:
-        try:
-            return torch.load(cache_file, weights_only=True)
-        except FileNotFoundError:
-            pass
+def load_video_frames(mp4_path: str, cache_path: str = None) -> torch.Tensor:
 
-    video_reader = decord.VideoReader(
-        mp4_path,
-        ctx=decord.cpu(0),
-        width=256,
-        height=256,
-        num_threads=-1,
-    )
-    frames = []
-    for i, frame in enumerate(tqdm(video_reader, desc=f'Loading frames from {mp4_path}')):
-        if i % 5 != 0:
-            continue
-        frames.append(torch.Tensor(frame.asnumpy()))
+    def extract_video_frames() -> torch.Tensor:
+        # Taken from min-stretch/data-collection/utils/new_gripper_model.py line 54
+        # print(f'Loading frames from {mp4_path}.')
+        video_reader = decord.VideoReader(
+            mp4_path,
+            ctx=decord.cpu(0),
+            width=256,
+            height=256,
+            num_threads=-1,
+        )
+        frames = []
+        for i, frame in enumerate(tqdm(video_reader, desc=f'Loading frames from {mp4_path}')):
+            if i % 5 != 0:
+                continue
+            frames.append(torch.Tensor(frame.asnumpy()))
 
-    frames_tensor = torch.stack(frames)
-    frames_tensor = frames_tensor / 255.0
-    frames_tensor = einops.rearrange(frames_tensor, "t h w c -> t c w h").flip(dims=[2])
-    # frames_tensor = NORMALIZER(frames_tensor)
-    torch.save(frames_tensor, cache_file)
-    return frames_tensor
+        frames_tensor = torch.stack(frames)
+        frames_tensor = frames_tensor / 255.0
+        frames_tensor = einops.rearrange(frames_tensor, "t h w c -> t c w h").flip(dims=[2])
+        # frames_tensor = NORMALIZER(frames_tensor)
+        return frames_tensor
+
+    return cache_operation(extract_video_frames, cache_path=cache_path)
 
 
 def tensor_to_image(x: torch.Tensor) -> np.ndarray:
@@ -90,21 +87,16 @@ def encode_frames(encoder: nn.Module, frames: torch.Tensor, cache_path: str = No
     Expects frames of shape (batch x height x width x channels) and returns
     encodings of shape (batch x encoding_length)
     """
-    if cache_path:
-        try:
-            return torch.load(cache_path, weights_only=True)
-        except FileNotFoundError:
-            pass
-    dataset = torch.utils.data.TensorDataset(frames)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    outputs = []
-    for batch, in dataloader:
-        output = encoder.forward(batch).detach().squeeze(0).unsqueeze(1)
-        outputs.append(output)
-    encoded = torch.cat(outputs, dim=0)
-    if cache_path:
-        torch.save(encoded, cache_path)
-    return encoded
+    def encode() -> torch.Tensor:
+        dataset = torch.utils.data.TensorDataset(frames)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        outputs = []
+        for batch, in tqdm(dataloader, desc=f'Encoding frames in batches of {batch_size}'):
+            output = encoder.forward(batch).detach().squeeze(0).unsqueeze(1)
+            outputs.append(output)
+        return torch.cat(outputs, dim=0)
+
+    return cache_operation(encode, cache_path=cache_path)
 
 
 # def extract_best_frames(similarity: torch.Tensor, count: int) -> list[int]:
@@ -137,7 +129,7 @@ def run_experiment():
     device = 'cpu'
     encoder = load_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
 
-    scan_frames = load_video_frames('frame-comparison-experiment/scan-over-bag-wide2.mp4', refresh=False).to(device)
+    scan_frames = load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
     def show_scan_frame(index: int):
         plt.title(f'Scan View Frame #{index}')
         plt.imshow(tensor_to_image(scan_frames[index, :, :, :]))
@@ -147,18 +139,18 @@ def run_experiment():
     # selected_scan_frame = 160
     # for index in [selected_scan_frame, 70, 140]:
     #     show_scan_frame(index)
-    start_frames = get_start_frames('/home/jaron_cui/Desktop/data/bag_pick_up_data', refresh=False).to(device)
+    start_frames = get_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
     plt.title('Sample Start Frame')
     plt.imshow(tensor_to_image(start_frames[50, :, :, :]))
     plt.show()
     plt.figure()
     # ref_frames = tensors_to_image(start_frames).squeeze(0)
     # query_frames = tensors_to_image(scan_frames).squeeze(0)
-    print('Encoding scan frames.')
-    scan_frame_encodings = encode_frames(encoder, scan_frames, cache_path='scan_frames.pt')
-    print('Encoding start frames.')
-    start_frame_encodings = encode_frames(encoder, start_frames, cache_path='start_frames.pt')
-    print(scan_frame_encodings.shape)
+    # print('Encoding scan frames.')
+    scan_frame_encodings = encode_frames(encoder, scan_frames, cache_path='../cache/scan_frame_encodings.pt')
+    # print('Encoding start frames.')
+    start_frame_encodings = encode_frames(encoder, start_frames, cache_path='../cache/start_frame_encodings.pt')
+    # print(scan_frame_encodings.shape)
     # reference_descriptors = []
     # for ref in ref_frames:
     #     reference_descriptors.append(extract_orb_features(ref)[1])
@@ -205,32 +197,41 @@ def run_experiment():
     # plt.figure()
 
 
-def get_start_frames(dataset_root: str, refresh: bool = True) -> torch.Tensor:
-    cache_file = Path(dataset_root) / 'start_frames.pt'
-    if not refresh:
+def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: str = None):
+    if cache_path:
         try:
-            return torch.load(cache_file, weights_only=True)
+            return torch.load(cache_path, weights_only=True)
         except FileNotFoundError:
             pass
-    files = list(Path(dataset_root).rglob('*.mp4'))
-    if not files:
-        raise ValueError('No files found in dataset root.')
+    data = operation()
+    if cache_path:
+        torch.save(data, cache_path)
+    return data
 
-    start_frames = []
-    for i, file in enumerate(tqdm(files, desc=f'Extracting start frames from dataset at {dataset_root}')):
-        video_reader = decord.VideoReader(
-            str(file),
-            ctx=decord.cpu(0),
-            width=256,
-            height=256,
-            num_threads=-1,
-        )
-        frame = torch.Tensor(video_reader[0].asnumpy())
-        start_frames.append(frame)
 
-    start_frames = torch.stack(start_frames) / 255.0
-    start_frames = einops.rearrange(start_frames, "t h w c -> t c h w")
-    torch.save(start_frames, cache_file)
-    return start_frames
+def get_start_frames(dataset_root: str, cache_path: str) -> torch.Tensor:
+
+    def load_start_frames_from_dataset_videos() -> torch.Tensor:
+        files = list(Path(dataset_root).rglob('*.mp4'))
+        if not files:
+            raise ValueError('No files found in dataset root.')
+        start_frames = []
+        for i, file in enumerate(tqdm(files, desc=f'Extracting start frames from dataset at {dataset_root}')):
+            video_reader = decord.VideoReader(
+                str(file),
+                ctx=decord.cpu(0),
+                width=256,
+                height=256,
+                num_threads=-1,
+            )
+            frame = torch.Tensor(video_reader[0].asnumpy())
+            start_frames.append(frame)
+
+        start_frames = torch.stack(start_frames) / 255.0
+        start_frames = einops.rearrange(start_frames, "t h w c -> t c h w")
+        return start_frames
+
+    return cache_operation(load_start_frames_from_dataset_videos, cache_path)
+
 
 run_experiment()
