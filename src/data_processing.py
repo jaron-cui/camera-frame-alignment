@@ -6,19 +6,14 @@ import decord
 import einops
 import torch
 import numpy as np
-import os
-import sys
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import torchvision
-from sklearn.cluster import DBSCAN
 from torch import nn
 from tqdm import tqdm
 
 
 def load_encoder(weight_path: str, device) -> nn.Module:
-    # model = torchvision.models.resnet34(weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1)
-    # return model.to(device)
     class CustomModel(nn.Module):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -29,16 +24,6 @@ def load_encoder(weight_path: str, device) -> nn.Module:
             return self.layers(x).flatten(start_dim=1)
 
     return CustomModel().to(device)
-    # # Taken from imitation-in-homes/run.py line 70: _init_model()
-    # print('Loading encoder.')
-    # model = hydra.utils.instantiate(DictConfig({
-    #     '_target_': 'models.encoders.timm_encoders.TimmSSL',
-    #     'model_name': 'hf-hub:notmahi/dobb-e'
-    # })).to(device)
-    #
-    # checkpoint = torch.load(weight_path, device)
-    # model.load_state_dict(checkpoint["model"])
-    # return model
 
 
 def load_video_frames(mp4_path: str, cache_path: str = None) -> torch.Tensor:
@@ -99,32 +84,6 @@ def encode_frames(encoder: nn.Module, frames: torch.Tensor, cache_path: str = No
     return cache_operation(encode, cache_path=cache_path)
 
 
-# def extract_best_frames(similarity: torch.Tensor, count: int) -> list[int]:
-#     data = similarity.reshape(-1, 1)
-#
-#     # Step 1: Cluster the data to identify peaks
-#     dbscan = DBSCAN(eps=0.003, min_samples=5)  # Tune eps based on spread
-#     labels = dbscan.fit_predict(data)
-#     # print(labels)
-#     # Step 2: Find the local maxima within each cluster
-#     unique_labels = set(labels)
-#     peak_points = []
-#
-#     for label in unique_labels:
-#         if label == -1:  # Ignore noise
-#             continue
-#         cluster_points = data[labels == label]
-#         max_point = np.argmax(cluster_points[:, 0])  # Highest y-value in cluster
-#         peak_points.append(int(max_point))
-#         print('l', label)
-#
-#     # Step 3: Sort the peaks by height and select the top 10
-#     peak_points = sorted(peak_points, key=lambda p: similarity[p].item(), reverse=True)[:count]
-#     # peak_points = torch.from_numpy(np.array(peak_points))
-#     # print(peak_points.shape, peak_points)
-#     return peak_points
-
-
 def run_experiment():
     device = 'cpu'
     encoder = load_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
@@ -136,29 +95,16 @@ def run_experiment():
         plt.show()
         plt.figure()
 
-    # selected_scan_frame = 160
-    # for index in [selected_scan_frame, 70, 140]:
-    #     show_scan_frame(index)
     start_frames = get_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
     plt.title('Sample Start Frame')
     plt.imshow(tensor_to_image(start_frames[50, :, :, :]))
     plt.show()
     plt.figure()
-    # ref_frames = tensors_to_image(start_frames).squeeze(0)
-    # query_frames = tensors_to_image(scan_frames).squeeze(0)
-    # print('Encoding scan frames.')
     scan_frame_encodings = encode_frames(encoder, scan_frames, cache_path='../cache/scan_frame_encodings.pt')
-    # print('Encoding start frames.')
     start_frame_encodings = encode_frames(encoder, start_frames, cache_path='../cache/start_frame_encodings.pt')
-    # print(scan_frame_encodings.shape)
-    # reference_descriptors = []
-    # for ref in ref_frames:
-    #     reference_descriptors.append(extract_orb_features(ref)[1])
 
     start_frame_similarity = []
     for scan_frame in tqdm(scan_frame_encodings, desc='Comparing each scan frame to start frames'):
-        # scan_frame = scan_frame.unsqueeze(0)
-        # print(start_frame_encodings.shape, scan_frame.repeat(start_frame_encodings.size(0), 1, 1).shape, scan_frame.shape)
         x, y = start_frame_encodings, scan_frame.repeat(start_frame_encodings.size(0), 1, 1)
         similarity = F.cosine_similarity(x, y, dim=-1)
         # similarity = -torch.norm(x - y, dim=-1)
@@ -185,16 +131,6 @@ def run_experiment():
     # best_match = best_matches[0]
     for match in best_matches[:10]:
         show_scan_frame(match)
-
-    # frame_encoding = scan_frame_encodings[best_match].unsqueeze(0)
-    # # print(scan_frame_encodings.shape, frame_encoding.shape)
-    # scan_similarity = F.cosine_similarity(
-    #     scan_frame_encodings, frame_encoding.repeat(scan_frame_encodings.size(0), 1, 1), dim=-1).detach().numpy()
-    # plt.title(f'Similarity Within Scan #{best_match}')
-    # plt.xlabel('Frame')
-    # plt.ylabel('Similarity')
-    # plt.plot(range(len(scan_similarity)), scan_similarity)
-    # plt.figure()
 
 
 def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: str = None):
