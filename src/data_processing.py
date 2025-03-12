@@ -68,7 +68,12 @@ def tensors_to_image(x: torch.Tensor) -> np.ndarray:
     return x
 
 
-def encode_frames(encoder: nn.Module, frames: torch.Tensor, cache_path: str = None, batch_size: int = 256) -> torch.Tensor:
+def encode_frames(
+    encoder: typing.Callable[[torch.Tensor], torch.Tensor],
+    frames: torch.Tensor,
+    cache_path: str = None,
+    batch_size: int = 256
+) -> torch.Tensor:
     """
     Expects frames of shape (batch x height x width x channels) and returns
     encodings of shape (batch x encoding_length)
@@ -78,7 +83,7 @@ def encode_frames(encoder: nn.Module, frames: torch.Tensor, cache_path: str = No
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
         outputs = []
         for batch, in tqdm(dataloader, desc=f'Encoding frames in batches of {batch_size}'):
-            output = encoder.forward(batch).detach().squeeze(0).unsqueeze(1)
+            output = encoder(batch).detach().squeeze(0).unsqueeze(1)
             outputs.append(output)
         return torch.cat(outputs, dim=0)
 
@@ -102,7 +107,7 @@ def calculate_similarity_to_start_frames(frame_encoding: torch.Tensor, start_fra
     return similarity.mean().item()
 
 
-def display_most_similar_frames(
+def display_most_aligned_frames(
     frames: torch.Tensor,
     similarity_to_start_frames: typing.List[float],
     top_k: int
@@ -136,29 +141,51 @@ def display_most_similar_frames(
     plt.show()
 
 
-def run_experiment():
-    device = 'cpu'
-    encoder = load_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
-
-    scan_frames = load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
-
-    start_frames = get_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
-    display_frame(start_frames[50, :, :, :], title='Sample Start Frame')
-
-    scan_frame_encodings = encode_frames(encoder, scan_frames, cache_path='../cache/scan_frame_encodings.pt')
-    start_frame_encodings = encode_frames(encoder, start_frames, cache_path='../cache/start_frame_encodings.pt')
-
-    similarity_to_start_frames = []
-    for scan_frame in tqdm(scan_frame_encodings, desc='Comparing each scan frame to start frames'):
-        similarity_to_start_frames.append(calculate_similarity_to_start_frames(scan_frame, start_frame_encodings))
-
+def display_alignment_scores(similarity_to_start_frames: typing.List[float]):
     plt.title(f'Similarity to Start Frames')
     plt.xlabel('Frame')
     plt.ylabel('Similarity')
     plt.scatter(range(len(similarity_to_start_frames)), similarity_to_start_frames)
     plt.show()
 
-    display_most_similar_frames(scan_frames, similarity_to_start_frames, top_k=20)
+
+def run_experiment():
+    device = 'cpu'
+    encoder = load_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
+
+    scan_frames = load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
+    start_frames = load_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
+
+    alignment_scores = compute_alignment_scores(
+        scan_frames,
+        start_frames,
+        encoder,
+        calculate_similarity_to_start_frames,
+        scan_frame_encodings_cache_path='../cache/scan_frame_encodings.pt',
+        target_frame_encodings_cache_path='../cache/start_frame_encodings.pt'
+    )
+
+    display_frame(start_frames[50, :, :, :], title='Sample Start Frame')
+    display_alignment_scores(alignment_scores)
+    display_most_aligned_frames(scan_frames, alignment_scores, top_k=20)
+
+
+def compute_alignment_scores(
+    scan_frames: torch.Tensor,
+    target_frames: torch.Tensor,
+    encoder: typing.Callable[[torch.Tensor], torch.Tensor],
+    compute_encoding_alignment_score: typing.Callable[[torch.Tensor, torch.Tensor], float],
+    scan_frame_encodings_cache_path: str = None,
+    target_frame_encodings_cache_path: str = None
+):
+    scan_frame_encodings = encode_frames(encoder, scan_frames, cache_path=scan_frame_encodings_cache_path)
+    target_frame_encodings = encode_frames(encoder, target_frames, cache_path=target_frame_encodings_cache_path)
+
+    alignment_scores = []
+    for scan_frame in tqdm(scan_frame_encodings, desc='Comparing each scan frame to start frames'):
+        alignment_scores.append(compute_encoding_alignment_score(scan_frame, target_frame_encodings))
+
+    return alignment_scores
 
 
 def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: str = None):
@@ -173,7 +200,7 @@ def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: st
     return data
 
 
-def get_start_frames(dataset_root: str, cache_path: str) -> torch.Tensor:
+def load_start_frames(dataset_root: str, cache_path: str) -> torch.Tensor:
 
     def load_start_frames_from_dataset_videos() -> torch.Tensor:
         files = list(Path(dataset_root).rglob('*.mp4'))
