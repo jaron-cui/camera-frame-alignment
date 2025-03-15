@@ -36,10 +36,10 @@ def load_video_frames(mp4_path: str, cache_path: str = None) -> torch.Tensor:
     return cache_operation(extract_video_frames, cache_path=cache_path)
 
 
-def load_start_frames(dataset_root: str, cache_path: str) -> torch.Tensor:
+def load_start_frames(dataset_root: str, cache_path: str = None, transpose: bool = False, count: int = 1) -> torch.Tensor:
 
     def load_start_frames_from_dataset_videos() -> torch.Tensor:
-        files = list(Path(dataset_root).rglob('*.mp4'))
+        files = [file for file in Path(dataset_root).rglob('*.mp4') if 'Depth' not in str(file.name)]
         if not files:
             raise ValueError('No files found in dataset root.')
         start_frames = []
@@ -51,11 +51,14 @@ def load_start_frames(dataset_root: str, cache_path: str) -> torch.Tensor:
                 height=256,
                 num_threads=-1,
             )
-            frame = torch.Tensor(video_reader[0].asnumpy())
-            start_frames.append(frame)
+            for frame_index in range(count):
+                frame = torch.Tensor(video_reader[frame_index].asnumpy())
+                start_frames.append(frame)
 
         start_frames = torch.stack(start_frames) / 255.0
-        start_frames = einops.rearrange(start_frames, "t h w c -> t c h w")
+        start_frames = einops.rearrange(start_frames, 't h w c -> t c h w')
+        if transpose:
+            start_frames = start_frames.transpose(-1, -2).flip(dims=[-2])
         return start_frames
 
     return cache_operation(load_start_frames_from_dataset_videos, cache_path)

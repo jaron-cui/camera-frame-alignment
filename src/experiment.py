@@ -30,8 +30,8 @@ def run_experiment():
     # encoder = load_dino_cls_encoder(device)
     encoder = encoders.clip_encoder(device)
 
-    scan_frames = video.load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
-    start_frames = video.load_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
+    scan_frames = video.load_video_frames('../scans/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
+    start_frames = video.load_start_frames('../datasets/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
 
     alignment_scores = compute_alignment_scores(
         scan_frames,
