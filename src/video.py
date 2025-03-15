@@ -9,7 +9,9 @@ from tqdm import tqdm
 from utils import cache_operation
 
 
-def load_video_frames(mp4_path: str, cache_path: str = None) -> torch.Tensor:
+def load_video_frames(mp4_path: str, cache_path: str = None, skip_every: int = 1) -> torch.Tensor:
+    if skip_every < 1:
+        raise ValueError('skip_every must be at least 1.')
 
     def extract_video_frames() -> torch.Tensor:
         # Taken from min-stretch/data-collection/utils/new_gripper_model.py line 54
@@ -23,7 +25,7 @@ def load_video_frames(mp4_path: str, cache_path: str = None) -> torch.Tensor:
         )
         frames = []
         for i, frame in enumerate(tqdm(video_reader, desc=f'Loading frames from {mp4_path}')):
-            if i % 5 != 0:
+            if i % skip_every != 0:
                 continue
             frames.append(torch.Tensor(frame.asnumpy()))
 
