@@ -1,222 +1,24 @@
-import math
 import typing
-from pathlib import Path
 
-import clip
-import cv2
-import decord
-import einops
 import torch
-import numpy as np
-import matplotlib.pyplot as plt
 import torch.nn.functional as F
-import torchvision
-import torchvision.transforms as T
-from torch import nn
 from tqdm import tqdm
-from transformers import Dinov2Model, AutoImageProcessor, ViTModel, ViTImageProcessor
 
-
-def load_resnet_encoder(weight_path: str, device) -> nn.Module:
-    class CustomModel(nn.Module):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            model = torchvision.models.resnet34(weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1).eval()
-            self.layers = nn.Sequential(*list(model.children())[:-2])
-
-        def forward(self, x):
-            return self.layers(x).flatten(start_dim=1)
-
-    return CustomModel().to(device)
-
-
-def load_dino_hidden_state_encoder(device) -> nn.Module:
-    class DinoWrapper(nn.Module):
-        def __init__(self, model_name: str):
-            super().__init__()
-            self.model = ViTModel.from_pretrained(model_name).to(device)
-            # self.transform = T.Compose([
-            #     T.Resize((224, 224)),
-            #     T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            # ])
-            self.processor = ViTImageProcessor.from_pretrained(model_name)
-
-        def forward(self, x):
-            x = self.processor(images=x, return_tensors="pt").to(device)
-            outputs = self.model(**x)
-            return outputs.last_hidden_state[:, 1:, :].flatten(start_dim=1)
-
-    return DinoWrapper('facebook/dino-vits16').to(device).eval()
-
-
-def load_dino_cls_encoder(device) -> nn.Module:
-    class DinoWrapper(nn.Module):
-        def __init__(self, model_name: str):
-            super().__init__()
-            self.model = ViTModel.from_pretrained(model_name).to(device)
-            # self.transform = T.Compose([
-            #     T.Resize((224, 224)),
-            #     T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            # ])
-            self.processor = ViTImageProcessor.from_pretrained(model_name)
-
-        def forward(self, x):
-            x = self.processor(images=x, return_tensors="pt").to(device)
-            outputs = self.model(**x)
-            return outputs.last_hidden_state[:, 0, :]
-
-    return DinoWrapper('facebook/dino-vits16').to(device).eval()
-
-
-def load_clip_encoder(device) -> nn.Module:
-    class ClipWrapper(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.model, _ = clip.load('ViT-B/32', device=device)
-            self.preprocess = T.Compose([
-                T.Resize(size=224, interpolation=T.InterpolationMode.BICUBIC, max_size=None, antialias=True),
-                T.CenterCrop(size=(224, 224)),
-                T.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
-            ])
-            # print(self.preprocess.transforms)
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            x = self.preprocess(x)
-            with torch.no_grad():
-                image_features = self.model.encode_image(x)
-            # print(image_features.shape)
-            return image_features
-
-    return ClipWrapper().to(device).eval()
-
-
-def load_video_frames(mp4_path: str, cache_path: str = None) -> torch.Tensor:
-
-    def extract_video_frames() -> torch.Tensor:
-        # Taken from min-stretch/data-collection/utils/new_gripper_model.py line 54
-        # print(f'Loading frames from {mp4_path}.')
-        video_reader = decord.VideoReader(
-            mp4_path,
-            ctx=decord.cpu(0),
-            width=256,
-            height=256,
-            num_threads=-1,
-        )
-        frames = []
-        for i, frame in enumerate(tqdm(video_reader, desc=f'Loading frames from {mp4_path}')):
-            if i % 5 != 0:
-                continue
-            frames.append(torch.Tensor(frame.asnumpy()))
-
-        frames_tensor = torch.stack(frames)
-        frames_tensor = frames_tensor / 255.0
-        frames_tensor = einops.rearrange(frames_tensor, "t h w c -> t c w h").flip(dims=[2])
-        # frames_tensor = NORMALIZER(frames_tensor)
-        return frames_tensor
-
-    return cache_operation(extract_video_frames, cache_path=cache_path)
-
-
-def tensor_to_image(x: torch.Tensor) -> np.ndarray:
-    x = (x.detach().cpu() * 255).type(torch.uint8)
-    x = einops.rearrange(x, 'c h w -> h w c')
-    x = x.numpy()
-    return x
-
-
-def tensors_to_image(x: torch.Tensor) -> np.ndarray:
-    x = (x.detach().cpu() * 255).type(torch.uint8)
-    x = einops.rearrange(x, 't b c h w -> t b h w c')
-    x = x.numpy()
-    return x
-
-
-def encode_frames(
-    encoder: typing.Callable[[torch.Tensor], torch.Tensor],
-    frames: torch.Tensor,
-    cache_path: str = None,
-    batch_size: int = 128
-) -> torch.Tensor:
-    """
-    Expects frames of shape (batch x height x width x channels) and returns
-    encodings of shape (batch x encoding_length)
-    """
-    def encode() -> torch.Tensor:
-        dataset = torch.utils.data.TensorDataset(frames)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
-        outputs = []
-        for batch, in tqdm(dataloader, desc=f'Encoding frames in batches of {batch_size}'):
-            output = encoder(batch).detach()
-            outputs.append(output)
-        return torch.cat(outputs, dim=0)
-
-    return cache_operation(encode, cache_path=cache_path)
-
-
-def display_frame(frame: torch.Tensor, title: str = None):
-    if title is not None:
-        plt.title(title)
-    plt.imshow(tensor_to_image(frame))
-    plt.show()
-    plt.figure()
+import display
+import encoders
+import video
 
 
 def average_cosine_similarity(frame_encoding: torch.Tensor, start_frame_encodings: torch.Tensor) -> float:
     x, y = start_frame_encodings, frame_encoding.unsqueeze(0).expand(start_frame_encodings.size(0), -1)
     similarity = F.cosine_similarity(x, y, dim=-1)
-    # similarity = -torch.norm(x - y, dim=-1)
-    # ten_percent = max(int(0.1 * similarity.size(0)), 1)
-    # similarity.sort(descending=True)[0][:ten_percent].mean().item()
     return similarity.mean().item()
 
 
 def max_cosine_similarity(frame_encoding: torch.Tensor, start_frame_encodings: torch.Tensor) -> float:
     x, y = start_frame_encodings, frame_encoding.unsqueeze(0).expand(start_frame_encodings.size(0), -1)
     similarity = F.cosine_similarity(x, y, dim=-1)
-    # similarity = -torch.norm(x - y, dim=-1)
-    # ten_percent = max(int(0.1 * similarity.size(0)), 1)
-    # similarity.sort(descending=True)[0][:ten_percent].mean().item()
     return similarity.max().item()
-
-
-def display_most_aligned_frames(
-    frames: torch.Tensor,
-    similarity_to_start_frames: typing.List[float],
-    top_k: int
-):
-    column_count = 4
-    _, sorted_frame_indices = torch.Tensor(similarity_to_start_frames).sort(descending=True)
-    most_similar_frames = frames[sorted_frame_indices[:top_k]]
-
-    # format each image into a grid of subplots
-    cols, rows = column_count, max(1, math.ceil(top_k / column_count))
-    fig, axes = plt.subplots(
-        ncols=cols,
-        nrows=rows,
-        figsize=(cols, rows),
-        gridspec_kw={'hspace': 0, 'wspace': 0}
-    )
-    for i, frame in enumerate(most_similar_frames):
-        x, y = i % column_count, i // column_count
-        axes[y, x].imshow(tensor_to_image(frame))
-        axes[y, x].set_aspect('equal')
-        axes[y, x].set_xticklabels([])
-        axes[y, x].set_yticklabels([])
-        # axes[y, x].set_title(f'Match #{i + 1}')
-
-    fig.suptitle(f'Top {top_k} Matches from Scan')
-    subtitle = ', '.join([str(t.item()) for t in sorted_frame_indices[:top_k]])
-    fig.text(0.5, 0.93, subtitle, ha='center', fontsize=6, color='gray')
-    plt.tight_layout()
-    plt.show()
-
-
-def display_alignment_scores(similarity_to_start_frames: typing.List[float]):
-    plt.title(f'Similarity to Start Frames')
-    plt.xlabel('Frame')
-    plt.ylabel('Similarity')
-    plt.scatter(range(len(similarity_to_start_frames)), similarity_to_start_frames, marker='x')
-    plt.show()
 
 
 def run_experiment():
@@ -224,10 +26,10 @@ def run_experiment():
     # encoder = load_resnet_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
     # encoder = load_dino_hidden_state_encoder(device)
     # encoder = load_dino_cls_encoder(device)
-    encoder = load_clip_encoder(device)
+    encoder = encoders.clip_encoder(device)
 
-    scan_frames = load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
-    start_frames = load_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
+    scan_frames = video.load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
+    start_frames = video.load_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
 
     alignment_scores = compute_alignment_scores(
         scan_frames,
@@ -238,9 +40,9 @@ def run_experiment():
         # target_frame_encodings_cache_path='../cache/start_frame_encodings.pt'
     )
 
-    display_frame(start_frames[80, :, :, :], title='Sample Start Frame')
-    display_alignment_scores(alignment_scores)
-    display_most_aligned_frames(scan_frames, alignment_scores, top_k=20)
+    display.display_frame(start_frames[80, :, :, :], title='Sample Start Frame')
+    display.display_alignment_scores(alignment_scores)
+    display.display_most_aligned_frames(scan_frames, alignment_scores, top_k=20)
 
 
 def compute_alignment_scores(
@@ -251,13 +53,13 @@ def compute_alignment_scores(
     scan_frame_encodings_cache_path: str = None,
     target_frame_encodings_cache_path: str = None
 ):
-    scan_frame_encodings = encode_frames(
+    scan_frame_encodings = video.encode_frames(
         encoder,
         scan_frames,
         cache_path=scan_frame_encodings_cache_path,
         batch_size=32
     )
-    target_frame_encodings = encode_frames(
+    target_frame_encodings = video.encode_frames(
         encoder,
         target_frames,
         cache_path=target_frame_encodings_cache_path,
@@ -269,43 +71,6 @@ def compute_alignment_scores(
         alignment_scores.append(compute_encoding_alignment_score(scan_frame, target_frame_encodings))
 
     return alignment_scores
-
-
-def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: str = None):
-    if cache_path:
-        try:
-            return torch.load(cache_path, weights_only=True)
-        except FileNotFoundError:
-            pass
-    data = operation()
-    if cache_path:
-        torch.save(data, cache_path)
-    return data
-
-
-def load_start_frames(dataset_root: str, cache_path: str) -> torch.Tensor:
-
-    def load_start_frames_from_dataset_videos() -> torch.Tensor:
-        files = list(Path(dataset_root).rglob('*.mp4'))
-        if not files:
-            raise ValueError('No files found in dataset root.')
-        start_frames = []
-        for i, file in enumerate(tqdm(files, desc=f'Extracting start frames from dataset at {dataset_root}')):
-            video_reader = decord.VideoReader(
-                str(file),
-                ctx=decord.cpu(0),
-                width=256,
-                height=256,
-                num_threads=-1,
-            )
-            frame = torch.Tensor(video_reader[0].asnumpy())
-            start_frames.append(frame)
-
-        start_frames = torch.stack(start_frames) / 255.0
-        start_frames = einops.rearrange(start_frames, "t h w c -> t c h w")
-        return start_frames
-
-    return cache_operation(load_start_frames_from_dataset_videos, cache_path)
 
 
 run_experiment()
