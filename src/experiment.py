@@ -4,9 +4,11 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-import display
+import visualizations
 import encoders
 import video
+
+# This code has all been moved to experiments.ipynb. Go there, instead.
 
 
 def average_cosine_similarity(frame_encoding: torch.Tensor, start_frame_encodings: torch.Tensor) -> float:
@@ -40,9 +42,9 @@ def run_experiment():
         # target_frame_encodings_cache_path='../cache/start_frame_encodings.pt'
     )
 
-    display.display_frame(start_frames[80, :, :, :], title='Sample Start Frame')
-    display.display_alignment_scores(alignment_scores)
-    display.display_most_aligned_frames(scan_frames, alignment_scores, top_k=20)
+    visualizations.display_frame(start_frames[80, :, :, :], title='Sample Start Frame')
+    visualizations.display_alignment_scores(alignment_scores)
+    visualizations.display_most_aligned_frames(scan_frames, alignment_scores, top_k=20)
 
 
 def compute_alignment_scores(
@@ -73,4 +75,5 @@ def compute_alignment_scores(
     return alignment_scores
 
 
-run_experiment()
+if __name__ == '__main__':
+    run_experiment()
