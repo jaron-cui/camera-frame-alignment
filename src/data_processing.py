@@ -2,6 +2,7 @@ import math
 import typing
 from pathlib import Path
 
+import clip
 import cv2
 import decord
 import einops
@@ -20,7 +21,7 @@ def load_resnet_encoder(weight_path: str, device) -> nn.Module:
     class CustomModel(nn.Module):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            model = torchvision.models.resnet34(weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1)
+            model = torchvision.models.resnet34(weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1).eval()
             self.layers = nn.Sequential(*list(model.children())[:-2])
 
         def forward(self, x):
@@ -34,16 +35,16 @@ def load_dino_hidden_state_encoder(device) -> nn.Module:
         def __init__(self, model_name: str):
             super().__init__()
             self.model = ViTModel.from_pretrained(model_name).to(device)
-            self.transform = T.Compose([
-                T.Resize((224, 224)),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
+            # self.transform = T.Compose([
+            #     T.Resize((224, 224)),
+            #     T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            # ])
             self.processor = ViTImageProcessor.from_pretrained(model_name)
 
         def forward(self, x):
             x = self.processor(images=x, return_tensors="pt").to(device)
             outputs = self.model(**x)
-            return outputs.last_hidden_state.flatten(start_dim=1)
+            return outputs.last_hidden_state[:, 1:, :].flatten(start_dim=1)
 
     return DinoWrapper('facebook/dino-vits16').to(device).eval()
 
@@ -53,10 +54,10 @@ def load_dino_cls_encoder(device) -> nn.Module:
         def __init__(self, model_name: str):
             super().__init__()
             self.model = ViTModel.from_pretrained(model_name).to(device)
-            self.transform = T.Compose([
-                T.Resize((224, 224)),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
+            # self.transform = T.Compose([
+            #     T.Resize((224, 224)),
+            #     T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            # ])
             self.processor = ViTImageProcessor.from_pretrained(model_name)
 
         def forward(self, x):
@@ -65,6 +66,28 @@ def load_dino_cls_encoder(device) -> nn.Module:
             return outputs.last_hidden_state[:, 0, :]
 
     return DinoWrapper('facebook/dino-vits16').to(device).eval()
+
+
+def load_clip_encoder(device) -> nn.Module:
+    class ClipWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model, _ = clip.load('ViT-B/32', device=device)
+            self.preprocess = T.Compose([
+                T.Resize(size=224, interpolation=T.InterpolationMode.BICUBIC, max_size=None, antialias=True),
+                T.CenterCrop(size=(224, 224)),
+                T.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
+            ])
+            # print(self.preprocess.transforms)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = self.preprocess(x)
+            with torch.no_grad():
+                image_features = self.model.encode_image(x)
+            # print(image_features.shape)
+            return image_features
+
+    return ClipWrapper().to(device).eval()
 
 
 def load_video_frames(mp4_path: str, cache_path: str = None) -> torch.Tensor:
@@ -138,13 +161,22 @@ def display_frame(frame: torch.Tensor, title: str = None):
     plt.figure()
 
 
-def calculate_similarity_to_start_frames(frame_encoding: torch.Tensor, start_frame_encodings: torch.Tensor) -> float:
+def average_cosine_similarity(frame_encoding: torch.Tensor, start_frame_encodings: torch.Tensor) -> float:
     x, y = start_frame_encodings, frame_encoding.unsqueeze(0).expand(start_frame_encodings.size(0), -1)
     similarity = F.cosine_similarity(x, y, dim=-1)
     # similarity = -torch.norm(x - y, dim=-1)
     # ten_percent = max(int(0.1 * similarity.size(0)), 1)
     # similarity.sort(descending=True)[0][:ten_percent].mean().item()
     return similarity.mean().item()
+
+
+def max_cosine_similarity(frame_encoding: torch.Tensor, start_frame_encodings: torch.Tensor) -> float:
+    x, y = start_frame_encodings, frame_encoding.unsqueeze(0).expand(start_frame_encodings.size(0), -1)
+    similarity = F.cosine_similarity(x, y, dim=-1)
+    # similarity = -torch.norm(x - y, dim=-1)
+    # ten_percent = max(int(0.1 * similarity.size(0)), 1)
+    # similarity.sort(descending=True)[0][:ten_percent].mean().item()
+    return similarity.max().item()
 
 
 def display_most_aligned_frames(
@@ -161,8 +193,6 @@ def display_most_aligned_frames(
     fig, axes = plt.subplots(
         ncols=cols,
         nrows=rows,
-        # sharex='col',
-        # sharey='row',
         figsize=(cols, rows),
         gridspec_kw={'hspace': 0, 'wspace': 0}
     )
@@ -192,7 +222,9 @@ def display_alignment_scores(similarity_to_start_frames: typing.List[float]):
 def run_experiment():
     device = 'cuda'
     # encoder = load_resnet_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
-    encoder = load_dino_cls_encoder(device)
+    # encoder = load_dino_hidden_state_encoder(device)
+    # encoder = load_dino_cls_encoder(device)
+    encoder = load_clip_encoder(device)
 
     scan_frames = load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
     start_frames = load_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
@@ -201,7 +233,7 @@ def run_experiment():
         scan_frames,
         start_frames,
         encoder,
-        calculate_similarity_to_start_frames,
+        average_cosine_similarity,
         # scan_frame_encodings_cache_path='../cache/scan_frame_encodings.pt',
         # target_frame_encodings_cache_path='../cache/start_frame_encodings.pt'
     )
