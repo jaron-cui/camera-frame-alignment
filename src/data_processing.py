@@ -33,26 +33,38 @@ def load_dino_hidden_state_encoder(device) -> nn.Module:
     class DinoWrapper(nn.Module):
         def __init__(self, model_name: str):
             super().__init__()
-            # self.model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
-            # self.processor = AutoImageProcessor.from_pretrained(model_name)
-            self.model = ViTModel.from_pretrained('facebook/dino-vits16').to(device)
+            self.model = ViTModel.from_pretrained(model_name).to(device)
             self.transform = T.Compose([
                 T.Resize((224, 224)),
                 T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
-            self.processor = ViTImageProcessor.from_pretrained('facebook/dino-vits16')
+            self.processor = ViTImageProcessor.from_pretrained(model_name)
 
         def forward(self, x):
-            # inputs = self.processor(images=x, return_tensors="pt")
-            # print(x.shape)
-            # x = self.transform(x).to(device)
-            # outputs = self.model(x)
             x = self.processor(images=x, return_tensors="pt").to(device)
             outputs = self.model(**x)
-            # print(outputs.last_hidden_state.shape)
             return outputs.last_hidden_state.flatten(start_dim=1)
 
-    return DinoWrapper('facebook/dinov2-small').to(device).eval()
+    return DinoWrapper('facebook/dino-vits16').to(device).eval()
+
+
+def load_dino_cls_encoder(device) -> nn.Module:
+    class DinoWrapper(nn.Module):
+        def __init__(self, model_name: str):
+            super().__init__()
+            self.model = ViTModel.from_pretrained(model_name).to(device)
+            self.transform = T.Compose([
+                T.Resize((224, 224)),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            self.processor = ViTImageProcessor.from_pretrained(model_name)
+
+        def forward(self, x):
+            x = self.processor(images=x, return_tensors="pt").to(device)
+            outputs = self.model(**x)
+            return outputs.last_hidden_state[:, 0, :]
+
+    return DinoWrapper('facebook/dino-vits16').to(device).eval()
 
 
 def load_video_frames(mp4_path: str, cache_path: str = None) -> torch.Tensor:
@@ -180,7 +192,7 @@ def display_alignment_scores(similarity_to_start_frames: typing.List[float]):
 def run_experiment():
     device = 'cuda'
     # encoder = load_resnet_encoder('frame-comparison-experiment/checkpoint_bag_pick_up.pt', device)
-    encoder = load_dino_hidden_state_encoder(device)
+    encoder = load_dino_cls_encoder(device)
 
     scan_frames = load_video_frames('../data/scan-over-bag-wide2.mp4', cache_path='../cache/scan_frames.pt').to(device)
     start_frames = load_start_frames('../data/bag_pick_up_data', cache_path='../cache/start_frames.pt').to(device)
