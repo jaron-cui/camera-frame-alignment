@@ -1,3 +1,5 @@
+import os
+
 import einops
 import typing
 
@@ -5,7 +7,10 @@ import numpy as np
 import torch
 
 
-def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: str = None):
+PathLike = typing.Union[str, os.PathLike]
+
+
+def cache_operation(operation: typing.Callable[[], torch.Tensor], cache_path: PathLike = None):
     if cache_path:
         try:
             return torch.load(cache_path, weights_only=True)
