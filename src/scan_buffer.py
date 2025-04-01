@@ -52,6 +52,7 @@ class ScanBuffer:
         # score each frame
         rgb_encodings = batched_encoding(self.encoder, torch.stack([rgb for rgb, _ in self.frames]))
         depth_encodings = batched_encoding(self.encoder, torch.stack([depth for _, depth in self.frames]))
+
         self.scores = [
             self.evaluator(rgb_encoding, depth_encoding)
             for rgb_encoding, depth_encoding in zip(rgb_encodings, depth_encodings)
@@ -63,17 +64,19 @@ class ScanBuffer:
                 'Cannot retrieve best scan angle when frames have not been processed! '
                 'Call ScanBuffer.process() first.'
             )
+
         self.histogram = [0] * len(self.frames)
-        ranked_scores = set(reversed(arg_sort(self.scores))[:math.ceil(len(self.scores) * top_proportion)])
+        ranked_scores = set(list(reversed(arg_sort(self.scores)))[:math.ceil(len(self.scores) * top_proportion)])
         for i in ranked_scores:
             angle = self.scan_angles[i]
             considered = [j for j in ranked_scores if angle_difference(angle, self.scan_angles[j]) <= angle_tolerance]
             # set the processed score for a given frame to the number of proximal top scoring frames
             self.histogram[i] = len(considered)
+
         return self.scan_angles[arg_max(self.histogram)]
 
 
-class ResNetHiddenEncoder:
+class ResNetHiddenEncoder(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         model = torchvision.models.resnet34(weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1).eval()
@@ -84,15 +87,17 @@ class ResNetHiddenEncoder:
 
 
 class SimilarityEvaluator:
-    def __init__(self, reference_path: str):
+    def __init__(self, reference_path: str, rgb_weight: float = 1.0, depth_weight: float = 1.0):
         reference = torch.load(reference_path, weights_only=True)
         self.rgb_reference = reference[0]
         self.depth_reference = reference[1]
+        self.rgb_weight = rgb_weight
+        self.depth_weight = depth_weight
 
     def __call__(self, rgb_encoding: torch.Tensor, depth_encoding: torch.Tensor) -> float:
-        rgb_score = nn.functional.cosine_similarity(rgb_encoding, self.rgb_reference).item()
-        depth_score = nn.functional.cosine_similarity(depth_encoding, self.depth_reference).item()
-        return rgb_score + depth_score
+        rgb_score = nn.functional.cosine_similarity(rgb_encoding.unsqueeze(0), self.rgb_reference.unsqueeze(0)).item()
+        depth_score = nn.functional.cosine_similarity(depth_encoding.unsqueeze(0), self.depth_reference.unsqueeze(0)).item()
+        return self.rgb_weight * rgb_score + self.depth_weight * depth_score
 
     @staticmethod
     def create_reference(
@@ -109,11 +114,14 @@ class SimilarityEvaluator:
             next(Path(os.path.dirname(path)).rglob('Depth_Images_*')) for path in video_paths
         ]
 
+        rgb_start_frames = load_start_frames(video_paths, transpose=True)
         depth_start_frames = depth_to_rgb(load_depth_start_frames(depth_folder_paths), resize=(256, 256))
-        rgb_start_frames = load_start_frames(video_paths)
-
+        # import visualizations
+        # visualizations.display_frame(rgb_start_frames[0])
+        # visualizations.display_frame(depth_start_frames[0])
+        # return
         rgb_encodings = batched_encoding(encoder, rgb_start_frames)
-        depth_encodings = batched_encoding(encoder, depth_start_frames)
+        depth_encodings = batched_encoding(encoder, 1 - 0.5 * depth_start_frames)
 
         reference = torch.stack([
             rgb_encodings.mean(dim=0).squeeze(0),
@@ -199,26 +207,26 @@ def load_depth_start_frames(
     frames = []
     num_folders = len(folder_paths)
     for folder_path in tqdm(folder_paths, desc=f'Loading depth start frames from {num_folders} folders'):
-        file_frames = load_depth_frames_from_individual_binaries(folder_path)
+        file_paths = sorted(folder_path.glob('*.bin'), key=lambda path: os.path.basename(path))
         frame_indices = [number * skip_every for number in range(count)]
+        file_frames = load_depth_frames_from_individual_binaries([file_paths[i] for i in frame_indices])
         frames.extend(file_frames[frame_indices, :, :])
     return torch.from_numpy(np.array(frames))
 
 
 def load_depth_frames_from_individual_binaries(
-    folder_path: Path,
+    file_paths: typing.List[Path],
     width: int = 256,
     height: int = 192
 ) -> torch.Tensor:
     """
     Taken from camera-frame-alignment/video.py/load_depth_frames_from_individual_binaries.
 
-    :param folder_path:
+    :param file_paths:
     :param width:
     :param height:
     :return:
     """
-    file_paths = sorted(folder_path.glob('*.bin'), key=lambda path: os.path.basename(path))
     frames = []
     for file_path in file_paths:
         depth_map = np.fromfile(file_path, dtype=np.float32).reshape((height, width))
