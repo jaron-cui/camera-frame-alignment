@@ -1,24 +1,34 @@
 import math
+import os
 import typing
+from dataclasses import dataclass
 from pathlib import Path
 
 import decord
 import einops
+import numpy as np
 import torch
 import torchvision
+import torchvision.transforms as transforms
 from torch import nn
 from tqdm import tqdm
+
+
+@dataclass
+class FrameData:
+    rgb: torch.Tensor
+    depth: torch.Tensor
 
 
 class ScanBuffer:
     def __init__(
         self,
         encoder: typing.Callable[[torch.Tensor], torch.Tensor],
-        evaluator: typing.Callable[[torch.Tensor], float]
+        evaluator: typing.Callable[[torch.Tensor, torch.Tensor], float]
     ):
         self.encoder = encoder
         self.evaluator = evaluator
-        self.frames: typing.List[torch.Tensor] = []
+        self.frames: typing.List[typing.Tuple[torch.Tensor, torch.Tensor]] = []
         self.scan_angles: typing.List[float] = []
         self.scores: typing.List[float] = []
         self.histogram = []  # 'histogram' is a bit of a misnomer - more like 'sliding window'
@@ -29,8 +39,8 @@ class ScanBuffer:
         self.scores.clear()
         self.histogram.clear()
 
-    def add_frame(self, image: torch.Tensor, scan_angle_degrees: float):
-        self.frames.append(image)
+    def add_frame(self, rgb: torch.Tensor, depth: torch.Tensor, scan_angle_degrees: float):
+        self.frames.append((rgb, depth))
         self.scan_angles.append(normalize_angle_degrees(scan_angle_degrees))
 
     def process(self):
@@ -40,8 +50,12 @@ class ScanBuffer:
         # self.scan_angles = reorder_list(self.scan_angles, sorted_indices)
 
         # score each frame
-        encodings = batched_encoding(self.encoder, self.frames)
-        self.scores = [self.evaluator(encoding) for encoding in encodings]
+        rgb_encodings = batched_encoding(self.encoder, torch.stack([rgb for rgb, _ in self.frames]))
+        depth_encodings = batched_encoding(self.encoder, torch.stack([depth for _, depth in self.frames]))
+        self.scores = [
+            self.evaluator(rgb_encoding, depth_encoding)
+            for rgb_encoding, depth_encoding in zip(rgb_encodings, depth_encodings)
+        ]
 
     def retrieve_best_scan_angle(self, angle_tolerance: float = 10, top_proportion: float = 0.2):
         if len(self.frames) != len(self.scores):
@@ -71,19 +85,42 @@ class ResNetHiddenEncoder:
 
 class SimilarityEvaluator:
     def __init__(self, reference_path: str):
-        self.reference = torch.load(reference_path, weights_only=True)
+        reference = torch.load(reference_path, weights_only=True)
+        self.rgb_reference = reference[0]
+        self.depth_reference = reference[1]
 
-    def __call__(self, encoding: torch.Tensor) -> float:
-        return nn.functional.cosine_similarity(encoding, self.reference).item()
+    def __call__(self, rgb_encoding: torch.Tensor, depth_encoding: torch.Tensor) -> float:
+        rgb_score = nn.functional.cosine_similarity(rgb_encoding, self.rgb_reference).item()
+        depth_score = nn.functional.cosine_similarity(depth_encoding, self.depth_reference).item()
+        return rgb_score + depth_score
 
     @staticmethod
     def create_reference(
         encoder: typing.Callable[[torch.Tensor], torch.Tensor],
-        training_demo_dataset_path: str,
+        dataset_path: str,
+        is_unprocessed_dataset: bool,
         reference_save_path: str
     ):
-        start_frames = load_dataset_start_frames(training_demo_dataset_path)
-        # TODO: implement
+        if not is_unprocessed_dataset:
+            raise NotImplementedError()
+
+        video_paths = [file for file in Path(dataset_path).rglob('*.mp4') if 'Depth' not in str(file.name)]
+        depth_folder_paths = [
+            next(Path(os.path.dirname(path)).rglob('Depth_Images_*')) for path in video_paths
+        ]
+
+        depth_start_frames = depth_to_rgb(load_depth_start_frames(depth_folder_paths), resize=(256, 256))
+        rgb_start_frames = load_start_frames(video_paths)
+
+        rgb_encodings = batched_encoding(encoder, rgb_start_frames)
+        depth_encodings = batched_encoding(encoder, depth_start_frames)
+
+        reference = torch.stack([
+            rgb_encodings.mean(dim=0).squeeze(0),
+            depth_encodings.mean(dim=0).squeeze(0)
+        ])
+
+        torch.save(reference, reference_save_path)
 
 
 def load_dataset_start_frames(
@@ -141,9 +178,57 @@ def load_start_frames(
         start_frames = start_frames.transpose(-1, -2).flip(dims=[-2])
     return start_frames
 
+
+def load_depth_start_frames(
+    folder_paths: typing.List[Path],
+    count: int = 1,
+    skip_every: int = 1
+) -> torch.Tensor:
+    """
+    Loads the start frames from each file path in the same order as given.
+    Every frame must be of the same width and height.
+
+    Taken from camera-frame-alignment/video.py/load_depth_start_frames.
+
+    :param file_paths: a list of file paths
+    :param count:
+    :param skip_every:
+    :param cache_path:
+    :return: a numpy array of shape ((file_count*count) x height x width)
+    """
+    frames = []
+    num_folders = len(folder_paths)
+    for folder_path in tqdm(folder_paths, desc=f'Loading depth start frames from {num_folders} folders'):
+        file_frames = load_depth_frames_from_individual_binaries(folder_path)
+        frame_indices = [number * skip_every for number in range(count)]
+        frames.extend(file_frames[frame_indices, :, :])
+    return torch.from_numpy(np.array(frames))
+
+
+def load_depth_frames_from_individual_binaries(
+    folder_path: Path,
+    width: int = 256,
+    height: int = 192
+) -> torch.Tensor:
+    """
+    Taken from camera-frame-alignment/video.py/load_depth_frames_from_individual_binaries.
+
+    :param folder_path:
+    :param width:
+    :param height:
+    :return:
+    """
+    file_paths = sorted(folder_path.glob('*.bin'), key=lambda path: os.path.basename(path))
+    frames = []
+    for file_path in file_paths:
+        depth_map = np.fromfile(file_path, dtype=np.float32).reshape((height, width))
+        frames.append(depth_map)
+    return torch.from_numpy(np.stack(frames))
+
+
 def batched_encoding(
     encoder: typing.Callable[[torch.Tensor], torch.Tensor],
-    frames: typing.List[torch.Tensor],
+    frames: torch.Tensor,
     batch_size: int = 32
 ) -> torch.Tensor:
     """
@@ -154,13 +239,22 @@ def batched_encoding(
     :param batch_size:
     :return:
     """
-    dataset = torch.utils.data.TensorDataset(torch.stack(frames))
+    dataset = torch.utils.data.TensorDataset(frames)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
     outputs = []
     for batch, in dataloader:
         output = encoder(batch).detach()
         outputs.append(output)
     return torch.cat(outputs, dim=0)
+
+
+def depth_to_rgb(depth: torch.Tensor, resize: typing.Tuple[int, int] = None, max_depth: int = 5) -> torch.Tensor:
+    depth = depth.clamp_max(max_depth).divide(max_depth)
+    rgb = depth.unsqueeze(1).expand(-1, 3, -1, -1)
+    if resize is not None:
+        resize = transforms.Resize((256, 256))
+        rgb = resize(rgb)
+    return rgb
 
 
 def normalize_angle_degrees(angle_degrees: float):
