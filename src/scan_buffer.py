@@ -14,12 +14,7 @@ from torch import nn
 from tqdm import tqdm
 
 
-@dataclass
-class FrameData:
-    rgb: torch.Tensor
-    depth: torch.Tensor
-
-
+# This file was taken from https://github.com/jaron-cui/camera-frame-alignment/blob/main/src/scan_buffer.py
 class ScanBuffer:
     def __init__(
         self,
@@ -104,7 +99,9 @@ class SimilarityEvaluator:
         encoder: typing.Callable[[torch.Tensor], torch.Tensor],
         dataset_path: str,
         is_unprocessed_dataset: bool,
-        reference_save_path: str
+        reference_save_path: str,
+        start_frame_count: int = 5,
+        skip_every: int = 2
     ):
         if not is_unprocessed_dataset:
             raise NotImplementedError()
@@ -114,8 +111,10 @@ class SimilarityEvaluator:
             next(Path(os.path.dirname(path)).rglob('Depth_Images_*')) for path in video_paths
         ]
 
-        rgb_start_frames = load_start_frames(video_paths, transpose=True)
-        depth_start_frames = depth_to_rgb(load_depth_start_frames(depth_folder_paths), resize=(256, 256))
+        rgb_start_frames = load_start_frames(
+            video_paths, transpose=True, count=start_frame_count, skip_every=skip_every)
+        depth_start_frames = depth_to_rgb(load_depth_start_frames(
+            depth_folder_paths, count=start_frame_count, skip_every=skip_every), resize=(256, 256))
         # import visualizations
         # visualizations.display_frame(rgb_start_frames[0])
         # visualizations.display_frame(depth_start_frames[0])
@@ -209,8 +208,11 @@ def load_depth_start_frames(
     for folder_path in tqdm(folder_paths, desc=f'Loading depth start frames from {num_folders} folders'):
         file_paths = sorted(folder_path.glob('*.bin'), key=lambda path: os.path.basename(path))
         frame_indices = [number * skip_every for number in range(count)]
+        if len(file_paths) < max(frame_indices):
+            raise ValueError(f'Too few depth files to reach count in {folder_path}:'
+                             f'{", ".join([p.name for p in file_paths])}')
         file_frames = load_depth_frames_from_individual_binaries([file_paths[i] for i in frame_indices])
-        frames.extend(file_frames[frame_indices, :, :])
+        frames.extend(file_frames)
     return torch.from_numpy(np.array(frames))
 
 
