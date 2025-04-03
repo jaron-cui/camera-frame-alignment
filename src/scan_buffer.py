@@ -1,7 +1,6 @@
 import math
 import os
 import typing
-from dataclasses import dataclass
 from pathlib import Path
 
 import decord
@@ -18,7 +17,7 @@ from tqdm import tqdm
 class ScanBuffer:
     def __init__(
         self,
-        encoder: typing.Callable[[torch.Tensor], torch.Tensor],
+        encoder: nn.Module,
         evaluator: typing.Callable[[torch.Tensor, torch.Tensor], float]
     ):
         self.encoder = encoder
@@ -96,12 +95,12 @@ class SimilarityEvaluator:
 
     @staticmethod
     def create_reference(
-        encoder: typing.Callable[[torch.Tensor], torch.Tensor],
+        encoder: nn.Module,
         dataset_path: str,
         is_unprocessed_dataset: bool,
         reference_save_path: str,
         start_frame_count: int = 5,
-        skip_every: int = 2
+        skip_every: int = 3
     ):
         if not is_unprocessed_dataset:
             raise NotImplementedError()
@@ -115,12 +114,9 @@ class SimilarityEvaluator:
             video_paths, transpose=True, count=start_frame_count, skip_every=skip_every)
         depth_start_frames = depth_to_rgb(load_depth_start_frames(
             depth_folder_paths, count=start_frame_count, skip_every=skip_every), resize=(256, 256))
-        # import visualizations
-        # visualizations.display_frame(rgb_start_frames[0])
-        # visualizations.display_frame(depth_start_frames[0])
-        # return
-        rgb_encodings = batched_encoding(encoder, rgb_start_frames)
-        depth_encodings = batched_encoding(encoder, 1 - 0.5 * depth_start_frames)
+
+        rgb_encodings = batched_encoding(encoder, rgb_start_frames, verbose=True)
+        depth_encodings = batched_encoding(encoder, 1 - 0.5 * depth_start_frames, verbose=True)
 
         reference = torch.stack([
             rgb_encodings.mean(dim=0).squeeze(0),
@@ -166,7 +162,7 @@ def load_start_frames(
     """
     if not file_paths:
         raise ValueError('Must provide at least one file from which to load start frames.')
-    start_frames = []
+    start_frames = torch.zeros((len(file_paths) * count, 256, 256, 3))
     for i, file in enumerate(tqdm(file_paths, desc=f'Extracting start frames from {len(file_paths)} files')):
         video_reader = decord.VideoReader(
             str(file),
@@ -175,11 +171,11 @@ def load_start_frames(
             height=256,
             num_threads=-1,
         )
-        for frame_index in range(count):
+        for j, frame_index in enumerate(range(count)):
             frame = torch.Tensor(video_reader[frame_index * skip_every].asnumpy())
-            start_frames.append(frame)
+            start_frames[i * count + j] = frame
 
-    start_frames = torch.stack(start_frames) / 255.0
+    start_frames.divide_(255.0)
     start_frames = einops.rearrange(start_frames, 't h w c -> t c h w')
     if transpose:
         start_frames = start_frames.transpose(-1, -2).flip(dims=[-2])
@@ -206,11 +202,18 @@ def load_depth_start_frames(
     frames = []
     num_folders = len(folder_paths)
     for folder_path in tqdm(folder_paths, desc=f'Loading depth start frames from {num_folders} folders'):
-        file_paths = sorted(folder_path.glob('*.bin'), key=lambda path: os.path.basename(path))
+        file_paths = list(folder_path.glob('*.bin'))
+
+        # order the depth files by frame number: depth bin files are named 0.pt, 1.pt, ..., 11.pt, etc..
+        file_name_indices = [int(os.path.basename(path).split('.')[0]) for path in file_paths]
+        file_path_ordering = sorted(range(len(file_name_indices)), key=lambda i: file_name_indices[i])
+        file_paths = reorder_list(file_paths, file_path_ordering)
+
         frame_indices = [number * skip_every for number in range(count)]
         if len(file_paths) < max(frame_indices):
             raise ValueError(f'Too few depth files to reach count in {folder_path}:'
                              f'{", ".join([p.name for p in file_paths])}')
+
         file_frames = load_depth_frames_from_individual_binaries([file_paths[i] for i in frame_indices])
         frames.extend(file_frames)
     return torch.from_numpy(np.array(frames))
@@ -237,25 +240,35 @@ def load_depth_frames_from_individual_binaries(
 
 
 def batched_encoding(
-    encoder: typing.Callable[[torch.Tensor], torch.Tensor],
+    encoder: nn.Module,
     frames: torch.Tensor,
-    batch_size: int = 32
+    batch_size: int = 32,
+    verbose: bool = False
 ) -> torch.Tensor:
     """
+    Encodes a large sequence of RGB images in subdivisions to accommodate memory constraints.
+
     Taken from camera-frame-alignment/video.py/encode_frames.
 
-    :param encoder:
-    :param frames:
-    :param batch_size:
-    :return:
+    :param encoder: an image encoder that accepts inputs of shape (batch x channel x height x width)
+    :param frames: a sequence of RGB images of shape (count x channel x height x width)
+    :param batch_size: the size of the subdivisions to be encoded
+    :param verbose: display a tqdm progress bar
+    :return: the image encodings in the same order as the images were given
     """
+    if torch.cuda.is_available():
+        encoder = encoder.cuda()
+
     dataset = torch.utils.data.TensorDataset(frames)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    outputs = []
-    for batch, in dataloader:
-        output = encoder(batch).detach()
-        outputs.append(output)
-    return torch.cat(outputs, dim=0)
+    if verbose:
+        dataloader = tqdm(dataloader, desc=f'Encoding frames in batches of {batch_size}')
+
+    outputs = torch.zeros((frames.size(0), *encoder(frames[0].unsqueeze(0).cuda()).shape[1:]))
+    for i, (batch,) in enumerate(dataloader):
+        output = encoder(batch.cuda()).detach()
+        outputs[i * batch_size:(i + 1) * batch_size] = output
+    return outputs
 
 
 def depth_to_rgb(depth: torch.Tensor, resize: typing.Tuple[int, int] = None, max_depth: int = 5) -> torch.Tensor:
