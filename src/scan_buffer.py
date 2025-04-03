@@ -90,7 +90,8 @@ class SimilarityEvaluator:
 
     def __call__(self, rgb_encoding: torch.Tensor, depth_encoding: torch.Tensor) -> float:
         rgb_score = nn.functional.cosine_similarity(rgb_encoding.unsqueeze(0), self.rgb_reference.unsqueeze(0)).item()
-        depth_score = nn.functional.cosine_similarity(depth_encoding.unsqueeze(0), self.depth_reference.unsqueeze(0)).item()
+        depth_score = nn.functional.cosine_similarity(depth_encoding.unsqueeze(0),
+                                                      self.depth_reference.unsqueeze(0)).item()
         return self.rgb_weight * rgb_score + self.depth_weight * depth_score
 
     @staticmethod
@@ -258,15 +259,18 @@ def batched_encoding(
     """
     if torch.cuda.is_available():
         encoder = encoder.cuda()
+        def prep(t): return t.cuda()
+    else:
+        def prep(t): return t
 
     dataset = torch.utils.data.TensorDataset(frames)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
     if verbose:
         dataloader = tqdm(dataloader, desc=f'Encoding frames in batches of {batch_size}')
 
-    outputs = torch.zeros((frames.size(0), *encoder(frames[0].unsqueeze(0).cuda()).shape[1:]))
+    outputs = torch.zeros((frames.size(0), *encoder(prep(frames[0].unsqueeze(0))).shape[1:]))
     for i, (batch,) in enumerate(dataloader):
-        output = encoder(batch.cuda()).detach()
+        output = encoder(prep(batch)).detach()
         outputs[i * batch_size:(i + 1) * batch_size] = output
     return outputs
 
